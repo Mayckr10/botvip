@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
+from aiogram.types import FSInputFile
 from dotenv import load_dotenv
 
 # Carrega as chaves do arquivo .env
@@ -21,6 +22,25 @@ ADMIN_ID = 8086722916
 DB_NAME = "assinaturas.db"
 WEBHOOK_PORT = 8080 
 
+# Configurações da Postagem Automática
+CANAL_POSTAGEM = -1003798760481 
+INTERVALO_POSTAGEM = 3600 # 1 hora
+CAMINHO_VIDEO = "previa.mp4" 
+
+MENSAGEM_PERSUASIVA = (
+    "🔥 **VOCÊ ESTÁ CANSADO DE FICAR SÓ NA VONTADE?**\n\n"
+    "A internet está cheia de links quebrados e vídeos cortados. Você veio pelo **conteúdo de elite**. 🔞\n\n"
+    "> 💎 **O QUE VOCÊ GARANTE NO ACESSO VIP:**\n"
+    "> \n"
+    "> • **Acervo Premium:** Tudo em HD, selecionado a dedo.\n"
+    "> • **Sem Cortes, Sem Censura:** Vídeos completos, do início ao fim.\n"
+    "> • **Atualizações Diárias:** Conteúdo novo e fervendo todo santo dia.\n"
+    "> • **Organização Impecável:** Ache o que gosta em segundos.\n\n"
+    "💰 **VALOR PROMOCIONAL POR TEMPO LIMITADO!**\n\n"
+    "👇 **PARE DE PASSAR VONTADE AGORA!**\n"
+    "Clique no link abaixo e receba seu acesso instantâneo."
+)
+
 # Validação de segurança
 if not TOKEN or not CLIENT_ID or not CLIENT_SECRET:
     print("❌ ERRO: Variáveis de ambiente não encontradas no arquivo .env!")
@@ -31,9 +51,9 @@ dp = Dispatcher()
 
 # Preços e Prazos (Vitalício R$ 79,90)
 PLANS = {
-    "15": {"price": 29.90, "stars": 650, "days": 15, "label": "👀 15 DIAS"},
-    "30": {"price": 49.90, "stars": 1100, "days": 30, "label": "🔥 30 DIAS"},
-    "vitalicio": {"price": 79.90, "stars": 1800, "days": 9999, "label": "👑 VITALÍCIO"}
+    "15": {"price": 29.90, "days": 15, "label": "👀 15 DIAS"},
+    "30": {"price": 49.90, "days": 30, "label": "🔥 30 DIAS"},
+    "vitalicio": {"price": 79.90, "days": 9999, "label": "👑 VITALÍCIO"}
 }
 
 # --- BANCO DE DADOS ---
@@ -42,6 +62,35 @@ async def init_db():
         await db.execute('''CREATE TABLE IF NOT EXISTS membros 
             (user_id BIGINT PRIMARY KEY, plan TEXT, expire_date TIMESTAMP, status TEXT)''')
         await db.commit()
+
+# --- TASK DE POSTAGEM AUTOMÁTICA ---
+async def auto_post_task():
+    while True:
+        try:
+            bot_info = await bot.get_me()
+            markup = {"inline_keyboard": [[{"text": "🔓 DESTRAVAR ACESSO VIP", "url": f"https://t.me/{bot_info.username}"}]]}
+            
+            if os.path.exists(CAMINHO_VIDEO):
+                video = FSInputFile(CAMINHO_VIDEO)
+                await bot.send_video(
+                    chat_id=CANAL_POSTAGEM,
+                    video=video,
+                    caption=MENSAGEM_PERSUASIVA,
+                    reply_markup=markup,
+                    parse_mode="Markdown"
+                )
+            else:
+                await bot.send_message(
+                    chat_id=CANAL_POSTAGEM,
+                    text=MENSAGEM_PERSUASIVA,
+                    reply_markup=markup,
+                    parse_mode="Markdown"
+                )
+            logging.info("✅ Postagem automática realizada.")
+        except Exception as e:
+            logging.error(f"❌ Erro na postagem automática: {e}")
+        
+        await asyncio.sleep(INTERVALO_POSTAGEM)
 
 # --- INTEGRAÇÃO SYNCPAY ---
 async def get_syncpay_pix(user_id, plan_key):
@@ -118,7 +167,6 @@ async def process_sel(callback: types.CallbackQuery):
     plan = callback.data.split("_")[1]
     markup = {"inline_keyboard": [
         [{"text": "💠 Pagar via PIX", "callback_data": f"pix_{plan}"}],
-        [{"text": "⭐ Pagar via Stars", "callback_data": f"stars_{plan}"}],
         [{"text": "⬅️ Voltar", "callback_data": "back_to_start"}]
     ]}
     await callback.message.edit_text(f"Plano: {PLANS[plan]['label']}\nComo deseja pagar?", reply_markup=markup)
@@ -145,20 +193,6 @@ async def process_pix(callback: types.CallbackQuery):
         await wait.edit_text("❌ Erro ao gerar. Verifique o painel SyncPay.")
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("stars_"))
-async def process_stars(callback: types.CallbackQuery):
-    p = callback.data.split("_")[1]
-    await bot.send_invoice(callback.message.chat.id, title=PLANS[p]['label'], description="VIP", payload=f"stars:{p}", currency="XTR", prices=[{"label": "VIP", "amount": PLANS[p]['stars']}] )
-    await callback.answer()
-
-@dp.pre_checkout_query()
-async def pre_checkout(query: types.PreCheckoutQuery):
-    await bot.answer_pre_checkout_query(query.id, ok=True)
-
-@dp.message(F.successful_payment)
-async def stars_success(message: types.Message):
-    await activate_user(message.from_user.id, message.successful_payment.invoice_payload.split(":")[1])
-
 # --- WEBHOOK ---
 async def handle_webhook(request):
     try:
@@ -171,6 +205,10 @@ async def handle_webhook(request):
 
 async def main():
     await init_db()
+    
+    # Inicia a tarefa de postagem automática sem travar o bot
+    asyncio.create_task(auto_post_task())
+    
     app = web.Application()
     app.router.add_post('/webhook', handle_webhook)
     runner = web.AppRunner(app)
